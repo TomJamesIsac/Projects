@@ -1,0 +1,671 @@
+---
+title: "MiTH"
+author: "Tom J Isac"
+date: "14 July 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Clearing all global objects
+```{r}
+rm(list =ls(all.names = TRUE)) 
+```
+
+## Setting the path and working directory
+```{r}
+getwd()
+setwd("F:\\MiTH")
+```
+
+##Loading all required libraries
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(caret)
+
+library(gridExtra)
+library(ggridges)
+library(GGally)
+library(hexbin)
+
+library(corrplot)
+
+library(DMwR)
+library(randomForest)
+
+library(ROCR)
+
+library(class)
+
+library(MASS)
+library(vegan)
+library(ada)
+
+
+```
+
+Read the data
+```{r}
+data <- read.csv("dataset.csv", header = T)
+train <- filter(data, istrain == 1) # Using filter function in dplyr package to split test and train
+test <- filter(data, istrain!= 1) 
+rm(data) # Remove from memory the initial data
+```
+
+Dropping the istrain column after ths split since it is irrelevant
+
+```{r}
+train$istrain <- NULL
+test$istrain <- NULL
+```
+
+Dropping ROW ID from target and test
+```{r}
+train$RowID <- NULL
+test_index <- test$RowID # Test index is stored to be used in submission file later
+test$RowID <- NULL 
+test$ExtraTime <- NULL # Dropping target variable from test data also
+
+```
+
+
+
+##Structure of the data
+```{r}
+str(train)
+# JobLevel, Education should be converted to factor
+
+```
+
+#Summary of the data
+
+```{r}
+summary(train)
+```
+
+# First 5 rows
+# Last 10 rows of data
+```{r}
+head(train)
+tail(train,10)
+```
+
+
+
+
+
+## Check for NA in the dataset
+```{r}
+sum(is.na(train))
+sum(is.na(test))
+
+# No NA's present in the dataset
+```
+
+##Visualisation
+
+1. Job Role v/s Extra Time
+```{r}
+train %>%
+  count(JobRole,ExtraTime) %>%
+  filter(ExtraTime == 'Yes') %>%
+  ggplot(aes(n,reorder(JobRole,n))) +
+  geom_point() +
+  xlab('Count of people working Extra Time') + ylab('Job Role') +
+  geom_segment(aes(x = 0, xend = n, y = JobRole, yend = JobRole), size = .15)
+  
+  
+```
+
+2. Job Level v/s Extra Time
+```{r}
+train %>%
+  count(Joblevel,ExtraTime) %>%
+  filter(ExtraTime == 'Yes') %>%
+  ggplot(aes(n,reorder(Joblevel,n))) +
+  geom_point() +
+  xlab('Count of people working Extra Time') + ylab('Job Level') 
+
+```
+
+
+3. Gender v/s Extra Time
+```{r}
+ p <- ggplot(train, aes(Gender,ExtraTime))
+ p + geom_bar(stat = "identity", aes(fill = ExtraTime))
+
+```
+
+4. Department v/s Extra Time
+```{r}
+ p <- ggplot(train, aes(Division,ExtraTime))
+ p + geom_bar(stat = "identity", aes(fill = ExtraTime))
+```
+
+
+#### Feature Engineering
+
+
+
+# 1) isTrain and Row ID is dropped initially    
+#    Additionaly drop Employee ID
+```{r}
+train$EmployeeID <- NULL
+test$EmployeeID <- NULL
+```
+
+
+
+## 2) Columns with a unique value and handling
+Over18, EmployeeCount and StandardHours has only one value. They can be dropped
+```{r} 
+length(unique(train$Over18)) 
+length(unique(train$EmployeeCount))
+length(unique(train$StandardHours))
+# Columns Over18 and StandardHours has only one value, they can be dropped due to no variance
+
+train$Over18 <- NULL
+test$Over18 <- NULL
+train$StandardHours <- NULL
+test$StandardHours <- NULL
+train$EmployeeCount <- NULL
+test$EmployeeCount <- NULL
+```
+
+```{r}
+summary(train)
+```
+
+
+## Check if Division categories and JobRoles add up in the entire dataset
+# Initial data is called again
+
+```{r}
+summary(data$Division)
+```
+
+```{r}
+summary(data$JobRole)
+```
+```{r}
+rm(data)
+```
+
+Since, no column can be explained as the sum of multiple columns, need to keep both Division and JobRole
+
+
+## 3) Handling Date columns
+
+# Creation of two new columns
+# workExp - Number of days between initial joining date and date of data collection
+# currentExp - Number of days between joining date in this company and date of data collection
+```{r}
+train$workExp <- as.Date(as.character(train$datacollected), format="%m/%d/%Y")-
+                  as.Date(as.character(train$FirstJobDate), format="%m/%d/%Y")
+train$currentExp <- as.Date(as.character(train$datacollected), format="%m/%d/%Y")-
+                  as.Date(as.character(train$DateOfjoiningintheCurrentCompany), format="%m/%d/%Y")
+
+
+test$workExp <- as.Date(as.character(test$datacollected), format="%m/%d/%Y")-
+                  as.Date(as.character(test$FirstJobDate), format="%m/%d/%Y")
+test$currentExp <- as.Date(as.character(test$datacollected), format="%m/%d/%Y")-
+                  as.Date(as.character(test$DateOfjoiningintheCurrentCompany), format="%m/%d/%Y")
+
+```
+
+
+# Converting to numeric type for arithemtic operations
+```{r}
+
+class(train$workExp)
+# Type is difftime. Converting to numeric
+
+train$workExp <- as.numeric(train$workExp)
+train$currentExp <- as.numeric(train$currentExp)
+
+test$workExp <- as.numeric(test$workExp)
+test$currentExp <- as.numeric(test$currentExp)
+
+class(train$workExp)
+```
+
+# Check for negative value - some values are negative in train and test because data is collected after the reference dataCollected column
+```{r}
+min(train$workExp)
+min(train$currentExp)
+min(test$workExp)
+min(test$currentExp)
+
+```
+
+
+# Converting negative days to positive along with converting days to year rounded off to 1 decimal
+
+```{r}
+
+train$workExp <- abs(round(train$workExp/365, digits = 1))
+train$currentExp <- abs(round(train$currentExp/365, digits = 1))
+
+test$workExp <- abs(round(test$workExp/365, digits = 1))
+test$currentExp <- abs(round(test$currentExp/365, digits = 1))
+
+
+
+```
+
+# Dropping date columns - datacollected, FirstJobDate and DateOfjoiningintheCurrentCompany
+
+```{r}
+train$datacollected <- NULL
+train$FirstJobDate <- NULL
+train$DateOfjoiningintheCurrentCompany <- NULL
+
+test$datacollected <- NULL
+test$FirstJobDate <- NULL
+test$DateOfjoiningintheCurrentCompany <- NULL
+
+```
+
+
+
+## 4) Conversion of factors for categorical variables
+
+```{r}
+train$Joblevel <- as.factor(as.character(train$Joblevel))
+test$Joblevel <- as.factor(as.character(test$Joblevel))
+train$Education <- as.factor(as.character(train$Education))
+test$Education <- as.factor(as.character(test$Education))
+```
+
+# Ratings are not converted to factors since their average makes sense
+
+
+```{r}
+summary(train)
+str(train)
+summary(test)
+str(test)
+```
+
+
+### Train Data split to train and validation
+
+```{r}
+set.seed(786)
+
+train_rows <- createDataPartition(train$ExtraTime, p = 0.7,list = F) 
+
+train_data <- train[train_rows, ]
+validation_data <- train[-train_rows, ]
+rm(train_rows)
+```
+
+# Check proprotion of target variable in train and validation dataset
+
+```{r}
+prop.table(table(train$ExtraTime))
+```
+```{r}
+prop.table(table(train_data$ExtraTime))
+```
+
+
+```{r}
+prop.table(table(validation_data$ExtraTime))
+```
+
+
+
+### MODEL BUILDING
+
+## Model 1
+## Random Forest
+
+```{r}
+library(DMwR)
+library(randomForest)
+library(caret)
+
+set.seed(123)
+
+# RandomForest classification model
+rf_model = randomForest(ExtraTime ~ ., data=train_data, keep.forest=TRUE, ntree=100) 
+
+print(rf_model) # Summary of model
+
+rf_model$importance  
+round(importance(rf_model), 2) # Model importance of attributes rounded off to 2 decimals
+
+# Store the impotant attributes in the RF model in decreasing order
+rf_Imp_Attr = data.frame(rf_model$importance)
+rf_Imp_Attr = data.frame(row.names(rf_Imp_Attr),rf_Imp_Attr[,1])
+colnames(rf_Imp_Attr) = c('Attributes', 'Importance')
+rf_Imp_Attr = rf_Imp_Attr[order(rf_Imp_Attr$Importance, decreasing = TRUE),]
+
+varImpPlot(rf_model) # Plotting the important feautures
+
+# Prediction on train data
+pred_Train = predict(rf_model, train_data[,setdiff(names(train_data), "ExtraTime")],
+                     type="response", norm.votes=TRUE)
+
+# Build confusion matrix and find accuracy of train data prediction 
+cm_Train = table("actual"= train_data$ExtraTime, "predicted" = pred_Train)
+accu_Train= sum(diag(cm_Train))/sum(cm_Train)
+rm(pred_Train, cm_Train)
+
+# Predicton on test Data
+pred_Test = predict(rf_model, validation_data[,setdiff(names(validation_data),"ExtraTime")],
+                    type="response", norm.votes=TRUE)
+
+# Build confusion matrix and find accuracy   
+cm_Test = table("actual"=validation_data$ExtraTime, "predicted"=pred_Test);
+accu_Test= sum(diag(cm_Test))/sum(cm_Test)
+rm(pred_Test, cm_Test)
+
+accu_Train
+accu_Test
+```
+# Accuracy on validation data  = 74.97%
+
+## Model 2
+## Random Forest with the top 14 attributes
+
+```{r}
+# Build randorm forest using top 55%  attributes 
+top_Imp_Attr = as.character(rf_Imp_Attr$Attributes[1:14])
+
+set.seed(123)
+
+# Build the classification model using randomForest
+model_Imp = randomForest(ExtraTime~.,data=train_data[,c(top_Imp_Attr,"ExtraTime")], 
+                         keep.forest=TRUE,ntree=100) 
+
+print(model_Imp) # Model and Importance of model
+model_Imp$importance  
+
+# Predict on Train data 
+pred_Train = predict(model_Imp, train_data[,top_Imp_Attr],type="response", norm.votes=TRUE)
+
+# Confusion matric and accuracy   
+cm_Train = table("actual" = train_data$ExtraTime, "predicted" = pred_Train);
+accu_Train_Imp = sum(diag(cm_Train))/sum(cm_Train)
+rm(pred_Train, cm_Train)
+
+# Predicton Test Data
+pred_Test = predict(model_Imp, validation_data[,top_Imp_Attr],type="response", norm.votes=TRUE)
+
+# Build confusion matrix and find accuracy   
+cm_Test = table("actual" = validation_data$ExtraTime, "predicted" = pred_Test);
+accu_Test_Imp = sum(diag(cm_Test))/sum(cm_Test)
+rm(pred_Test, cm_Test)
+
+accu_Train
+accu_Test
+accu_Train_Imp
+accu_Test_Imp
+```
+# Accuracy on validation data  = 74.98 %
+
+
+#Select mtry value with minimum out of bag(OOB) error
+
+```{r}
+mtry <- tuneRF(train_data[-21],train_data$ExtraTime, ntreeTry=100,
+               stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE) #train_data[-21] - Drop ExtraTime
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+
+
+```
+
+Best M is obtained as 3 with 24.97% OOB
+
+## Model 3
+## Random Forest with the best mtry = 3
+
+```{r}
+#Build Model with best mtry again - 
+set.seed(123)
+rf <- randomForest(ExtraTime~.,data=train_data, mtry=best.m, importance=TRUE,ntree=100)
+print(rf)
+
+#Evaluate variable importance
+importance(rf)
+
+# Important attributes
+rf$importance  
+round(importance(rf), 2)   
+
+# Extract and store important variables obtained from the random forest model
+rf_Imp_Attr = data.frame(rf$importance)
+rf_Imp_Attr = data.frame(row.names(rf_Imp_Attr),rf_Imp_Attr[,1])
+colnames(rf_Imp_Attr) = c('Attributes', 'Importance')
+rf_Imp_Attr = rf_Imp_Attr[order(rf_Imp_Attr$Importance, decreasing = TRUE),]
+
+# Predict on Train data 
+pred_Train = predict(rf, train_data[,setdiff(names(train_data), "ExtraTime")],
+                     type="response",norm.votes=TRUE)
+
+# Build confusion matrix and find accuracy   
+cm_Train = table("actual"= train_data$ExtraTime, "predicted" = pred_Train);
+accu_Train_mtry = sum(diag(cm_Train))/sum(cm_Train)
+rm(pred_Train, cm_Train)
+
+# Predicton Test Data
+pred_Test_mtry = predict(rf, validation_data[,setdiff(names(validation_data),"ExtraTime")],
+                    type="response", norm.votes=TRUE)
+
+# Build confusion matrix and find accuracy   
+cm_Test = table("actual"=validation_data$ExtraTime, "predicted"=pred_Test_mtry);
+accu_Test_mtry= sum(diag(cm_Test))/sum(cm_Test)
+rm(cm_Test)
+
+accu_Train_mtry
+accu_Test_mtry
+```
+
+# Accuracy on validation data  = 75.37 %
+
+## Model 4
+## Random Forest with the best mtry = 3 and top 14 attributes
+
+```{r}
+# Build randorm forest using top 55%  attributes 
+top_Imp_Attr = as.character(rf_Imp_Attr$Attributes[1:14])
+
+set.seed(123)
+
+# Build the classification model using randomForest
+model_Imp = randomForest(ExtraTime~.,data=train_data[,c(top_Imp_Attr,"ExtraTime")], mtry=best.m,
+                         keep.forest=TRUE,ntree=100) 
+
+print(model_Imp) # Model and Importance of model
+model_Imp$importance  
+
+# Predict on Train data 
+pred_Train = predict(model_Imp, train_data[,top_Imp_Attr],type="response", norm.votes=TRUE)
+
+# Confusion matric and accuracy   
+cm_Train = table("actual" = train_data$ExtraTime, "predicted" = pred_Train);
+accu_Train_Imp_mtry = sum(diag(cm_Train))/sum(cm_Train)
+rm(pred_Train, cm_Train)
+
+# Predicton Test Data
+pred_Test = predict(model_Imp, validation_data[,top_Imp_Attr],type="response", norm.votes=TRUE)
+
+# Build confusion matrix and find accuracy   
+cm_Test = table("actual" = validation_data$ExtraTime, "predicted" = pred_Test);
+accu_Test_Imp_mtry = sum(diag(cm_Test))/sum(cm_Test)
+rm(pred_Test, cm_Test)
+
+accu_Train_Imp_mtry
+accu_Test_Imp_mtry
+```
+
+# Accuracy on validation data  = 75.03 %
+
+# Choosing Model 3 with best mtry = 3
+
+# Confusion Matrix for best model
+```{r}
+confusionMatrix(data = pred_Test_mtry, reference = validation_data$ExtraTime, positive = "Yes")
+```
+
+# Prediction on Test Data
+
+```{r}
+
+pred_Test_actual = predict(rf, test,type="response", norm.votes=TRUE)
+
+submission_RF_mtry <- data.frame(RowID =test_index, ExtraTime =pred_Test_actual)
+write.csv(submission_RF_mtry, "submission1_RF_mtry3.csv", row.names = F)
+
+```
+# Grader accuracy = 75.264%
+# Grader recall = 74.469%
+
+```{r}
+
+pred_Test_actual_2 = predict(model_Imp, test,type="response", norm.votes=TRUE)
+
+submission_RF_mtry_2 <- data.frame(RowID =test_index, ExtraTime =pred_Test_actual_2)
+write.csv(submission_RF_mtry_2, "submission1_RF_mtry3_1.csv", row.names = F)
+
+```
+
+
+## Model 5
+### BASIC LOGISTIC REGRESSION MODEL (GLM)
+
+Build a basic logistic regression model
+```{r}
+log_reg <- glm(ExtraTime~., data = train_data, family = binomial) # Basic glm model
+
+summary(log_reg) # Summary of the model
+```
+
+
+# Creating ROC plot to decide the tradeoff between tpr and fpr
+
+```{r}
+prob_train <- predict(log_reg, type = "response")
+summary(prob_train)
+
+pred <- prediction(prob_train, train_data$ExtraTime)
+
+perf<- performance(pred, measure = "tpr", x.measure = "fpr") # Extracting performance measures (TPR and FPR)
+
+plot(perf, col=rainbow(10), colorize = T, print.cutoffs.at = seq(0,1,0.05)) # PLotting ROC curve
+
+```
+
+```{r}
+perf_auc <- performance(pred, measure = "auc")
+perf_auc
+
+auc <- perf_auc@y.values[[1]] # auc score from the performace object
+auc
+```
+
+Choosing a cutoff of 0.45 with 70% tpr and 40% fpr
+```{r}
+plot(perf, col=rainbow(10), colorize = T, print.cutoffs.at = 0.5) # Cutoff chosen from ROC plot
+```
+
+# Prediction on validation data
+```{r}
+
+prob_test <- predict(log_reg, validation_data, type = "response")
+preds_test <- ifelse(prob_test > 0.5, 'Yes' , 'No') # Cut off chosen is used here
+
+```
+
+```{r}
+# Confusion Matrix
+
+confusionMatrix(data = preds_test, reference = validation_data$ExtraTime, positive = "Yes") 
+```
+
+
+# Accuracy is only 65%
+
+## Model 6
+## Improving Logistic Regression model with stepAIC
+
+```{r}
+model_aic <- stepAIC(log_reg, direction = "both")
+```
+
+```{r}
+summary(model_aic)
+```
+
+
+```{r}
+prob_test_aic <- predict(model_aic, validation_data, type = "response")
+preds_test_aic <- ifelse(prob_test > 0.5, 'Yes' , 'No')
+```
+
+
+```{r}
+# Confusion Matrix
+
+confusionMatrix(data = preds_test_aic, reference = validation_data$ExtraTime, positive = "Yes") 
+```
+
+
+# Accuracy is only slightly improved to 65.57% 
+
+## Model 7
+## Adaboost Model
+
+```{r}
+
+model = ada(x = train_std[-21], 
+            y = train_std$ExtraTime,
+            iter=50, loss="exponential", type= "discrete", nu= 0.4)
+
+
+```
+
+```{r}
+model
+summary(model)
+```
+
+
+# Prediction on train data
+```{r}
+pred_Train  =  predict(model, train_std[-21])
+cm_Train = table(train_std$ExtraTime, pred_Train)
+accu_Train= sum(diag(cm_Train))/sum(cm_Train)
+cm_Train
+cat("Accuracy on the training data:", accu_Train)
+```
+# Predict on Validation data
+```{r}
+pred_Test = predict(model, validation_std[-21]) 
+cm_Test = table(validation_std$ExtraTime, pred_Test)
+accu_Test= sum(diag(cm_Test))/sum(cm_Test)
+cm_Test
+cat("Accuracy on the Validation data:", accu_Test)
+```
+#Accuracy of 73.68 on validation
+
+#Predict on Test Data
+
+```{r}
+pred_Test_actual = predict(model, test_std)
+```
+
+```{r}
+submission_ada <- data.frame(RowID =test_index, ExtraTime =pred_Test_actual)
+write.csv(submission_ada, "submission3_Ada.csv", row.names = F)
+```
+
+
