@@ -2,7 +2,7 @@
 title: "MiTH"
 author: "Tom J Isac"
 date: "14 July 2018"
-output: html_document
+output: rmarkdown::github_document
 ---
 
 ```{r setup, include=FALSE}
